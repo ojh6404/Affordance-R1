@@ -105,7 +105,7 @@ def extract_bbox_points_think(output_text, x_factor, y_factor):
 reasoning_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         "",
         torch_dtype=torch.bfloat16,
-        # attn_implementation="flash_attention_2",
+        attn_implementation="flash_attention_2",
         device_map="auto",
     )
         
