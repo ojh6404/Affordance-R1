@@ -75,7 +75,7 @@ python3 training_scripts/model_merger.py --local_dir [path_to_your_actor_checkpo
 ```
 
 ## Evaluation  
-Data will be released soon! Stay tuned!
+Download the dataset, and modify the dataset path in the following file
 ```bash
 bash evaluation_scripts/eval_aff_r1.sh
 ```
