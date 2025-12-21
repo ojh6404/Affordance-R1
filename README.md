@@ -14,6 +14,7 @@ Model: [🤗 Affordance-R1](https://huggingface.co/hqking/affordance-r1/tree/mai
 
 ## News
 [Dec 21th, 2025] 🔥 ReasonAff is coming! We have released the original dataset, and as stated in the appendix of the paper, we will filter the test data and provide a cleaner dataset soon, stay tuned!!!
+
 [Aug 11th, 2025] 🔥 Affordance-R1 is coming! We have released the code !!!
 
 
