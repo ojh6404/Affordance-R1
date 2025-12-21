@@ -13,7 +13,7 @@ Model: [🤗 Affordance-R1](https://huggingface.co/hqking/affordance-r1/tree/mai
 
 
 ## News
-
+[Dec 21th, 2025] 🔥 ReasonAff is coming! We have released the original dataset, and as stated in the appendix of the paper, we will filter the test data and provide a cleaner dataset soon, stay tuned!!!
 [Aug 11th, 2025] 🔥 Affordance-R1 is coming! We have released the code !!!
 
 
@@ -59,7 +59,9 @@ Modify the path in inference_scripts/infer.py and then run the following
 ```bash
 python inference_scripts/infer.py 
 ```
-
+## Dataset
+Download our ReasonAff datasrt [here](https://drive.google.com/file/d/1J2Li8gSDKSfv4hflNvMcXdcO7xhGtVlZ/view?usp=drive_link)
+As mentioned in the paper, we found there are some coarse ground truth in the original dataset, and we are trying to filter some dataset in the test split of the data, and we will release it soon! Stay tuned!
 ## Training
 Download pretrained models:[Qwen2.5-VL-7B](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) and [SAM2](https://huggingface.co/facebook/sam2-hiera-large)
 Modify the path in `training_scripts/aff_r1.sh` and  `training_scripts/aff_r1.yaml`  and then run the following command to start training:
