@@ -169,8 +169,8 @@ class FSDPWorker(Worker):
 
                 apply_liger_kernel_to_qwen2_5_vl()
                 self.print_rank0("Liger kernel applied to Qwen2.5-VL")
-            except ImportError:
-                self.print_rank0("Warning: liger-kernel not installed, skipping liger kernel")
+            except ImportError as e:
+                self.print_rank0(f"Warning: liger-kernel not available, skipping: {e}")
 
         if self._is_critic:
             auto_class = AutoModelForTokenClassification

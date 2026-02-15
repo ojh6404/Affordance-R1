@@ -179,7 +179,7 @@ def qwen2vl_dtensor_weight_loader(actor_weights: Dict[str, torch.Tensor], vllm_m
                 continue  # skip loading extra bias for GPTQ models
 
             if "visual" in actor_name:
-                vllm_name = actor_name
+                vllm_name = actor_name.removeprefix("model.")
             else:
                 vllm_name = "language_model." + actor_name
 
