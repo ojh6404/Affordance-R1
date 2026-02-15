@@ -148,7 +148,7 @@ def main(
             print("No valid scenes found.")
             sys.exit(1)
 
-    script_path = str(Path(__file__).parent / "render_annotations.py")
+    script_path = str(Path(__file__).parent / "process_scenefun3d.py")
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
