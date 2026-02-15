@@ -12,8 +12,8 @@ SceneFun3D Toolkit
 
 from typing import Annotated
 import sys
+import time
 from pathlib import Path
-from tqdm import tqdm
 import imageio.v2 as imageio
 import cv2
 import os
@@ -24,6 +24,54 @@ import tyro
 SCENEFUN3D_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../third_party/scenefun3d"))
 sys.path.insert(0, SCENEFUN3D_ROOT)
 from utils.data_parser import DataParser
+
+
+def cheap_visibility_check(points_3d, annotation_indices, camera_to_world, intrinsics, img_shape,
+                           edge_margin_ratio=0.1, max_depth=3.0, min_in_frame_ratio=0.15):
+    """Fast pre-filter: checks if annotation is visible WITHOUT depth map (no occlusion check).
+
+    Returns True if the annotation passes basic geometric checks (in front of camera,
+    within max_depth, enough points in frame, not at edge).
+    """
+    h, w = img_shape[:2]
+    masked_points = points_3d[annotation_indices]
+    fx, fy, cx, cy = intrinsics
+
+    world_to_camera = np.linalg.inv(camera_to_world)
+    points_homo = np.concatenate([masked_points, np.ones([masked_points.shape[0], 1])], axis=1).T
+    points_cam = world_to_camera @ points_homo
+
+    # Filter points behind camera
+    in_front = points_cam[2] > 0
+    points_cam = points_cam[:, in_front]
+    if points_cam.shape[1] == 0:
+        return False
+
+    # Max depth check
+    if max_depth > 0 and np.median(points_cam[2]) > max_depth:
+        return False
+
+    # Project to 2D
+    u = np.round((points_cam[0] * fx) / points_cam[2] + cx).astype(int)
+    v = np.round((points_cam[1] * fy) / points_cam[2] + cy).astype(int)
+
+    # Check how many points are in frame
+    in_frame = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+    ratio = in_frame.sum() / len(annotation_indices) if len(annotation_indices) > 0 else 0
+    if ratio < min_in_frame_ratio:
+        return False
+
+    # Edge margin check on centroid
+    if edge_margin_ratio > 0:
+        u_valid, v_valid = u[in_frame], v[in_frame]
+        if len(u_valid) == 0:
+            return False
+        cu, cv = np.mean(u_valid), np.mean(v_valid)
+        mx, my = w * edge_margin_ratio, h * edge_margin_ratio
+        if cu < mx or cu > w - mx or cv < my or cv > h - my:
+            return False
+
+    return True
 
 
 def project_annotation_to_image(
@@ -269,7 +317,10 @@ def main(
         int | None, tyro.conf.arg(help="Max viewpoints per description. None=all valid frames")
     ] = None,
     min_view_gap: Annotated[int, tyro.conf.arg(help="Minimum frame index gap between selected viewpoints")] = 5,
+    output_scale: Annotated[float, tyro.conf.arg(help="Scale factor for output image size (e.g., 0.667 for 2/3)")] = 2 / 3,
 ):
+    t_start = time.time()
+
     # Read required data assets
     dataParser = DataParser(data_dir)
 
@@ -361,7 +412,7 @@ def main(
     # Match frames with poses
     matched_data = []
     timestamps = sorted(rgb_frames.keys())
-    for i, ts in enumerate(timestamps):
+    for ts in timestamps:
         nearest_pose = dataParser.get_nearest_pose(ts, poses, time_distance_threshold=0.1)
         if nearest_pose is not None and ts in intrinsics and ts in depth_frames:
             matched_data.append(
@@ -375,20 +426,40 @@ def main(
                 }
             )
 
-    print(f"Matched {len(matched_data)} frames with poses")
+    print(f"Matched {len(matched_data)} frames with poses ({time.time()-t_start:.1f}s)")
 
-    def get_frame_intrinsics(data):
-        """Load and scale intrinsics for a frame."""
+    # Precompute intrinsics and image shape (read one RGB to determine scale, then only text files)
+    print("Precomputing intrinsics...")
+    first_rgb = imageio.imread(matched_data[0]["rgb_path"])
+    img_h, img_w = first_rgb.shape[:2]
+    del first_rgb
+
+    frame_intrinsics = {}  # frame_index -> (fx, fy, cx, cy)
+    for data in matched_data:
         with open(data["intrinsics_path"], "r") as f:
             parts = f.readline().strip().split()
             w_i, h_i = int(parts[0]), int(parts[1])
             fx, fy = float(parts[2]), float(parts[3])
             cx, cy = float(parts[4]), float(parts[5])
-        rgb_img = imageio.imread(data["rgb_path"])
-        if rgb_img.shape[1] != w_i or rgb_img.shape[0] != h_i:
-            sx, sy = rgb_img.shape[1] / w_i, rgb_img.shape[0] / h_i
-            return rgb_img, (fx * sx, fy * sy, cx * sx, cy * sy)
-        return rgb_img, (fx, fy, cx, cy)
+        if img_w != w_i or img_h != h_i:
+            sx, sy = img_w / w_i, img_h / h_i
+            frame_intrinsics[data["frame_index"]] = (fx * sx, fy * sy, cx * sx, cy * sy)
+        else:
+            frame_intrinsics[data["frame_index"]] = (fx, fy, cx, cy)
+
+    # Lazy depth loading cache (load on demand, reuse across descriptions)
+    frame_depth_cache = {}
+
+    def get_depth(fidx):
+        if fidx not in frame_depth_cache:
+            data = matched_data[fidx]
+            dm = dataParser.read_depth_frame(data["depth_path"])
+            if dm.shape[0] != img_h or dm.shape[1] != img_w:
+                dm = cv2.resize(dm, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
+            frame_depth_cache[fidx] = dm
+        return frame_depth_cache[fidx]
+
+    print(f"Setup done ({time.time()-t_start:.1f}s)")
 
     def project_point_3d_to_2d(point_3d, pose, intr, img_shape):
         """Project a single 3D point to 2D pixel coordinates."""
@@ -411,9 +482,11 @@ def main(
     out_path = Path(output_dir)
     images_dir = out_path / "images"
     masks_dir = out_path / "masks"
+    depth_dir = out_path / "depths"
     vis_dir = out_path / "vis"
     images_dir.mkdir(parents=True, exist_ok=True)
     masks_dir.mkdir(parents=True, exist_ok=True)
+    depth_dir.mkdir(parents=True, exist_ok=True)
     vis_dir.mkdir(parents=True, exist_ok=True)
 
     # Process each description (one record per description, all annotations together)
@@ -446,23 +519,37 @@ def main(
         if len(valid_annots) == 0:
             continue
 
-        print(f"\nProcessing description {desc_idx}/{len(descriptions)}: {description_text[:50]}...")
-        print(f"  Annotations: {[a['label'] for a in valid_annots]}")
+        t_desc = time.time()
+        print(f"\nProcessing description {desc_idx+1}/{len(descriptions)}: {description_text[:50]}...")
+        print(f"  Annotations: {[a['label'] for a in valid_annots]} ({sum(len(a['indices']) for a in valid_annots)} pts)")
 
-        # Find all frames where ALL annotations are visible, scored by min visibility
-        candidates = []  # list of (score, frame_index, data, intr, frame_results)
+        # Stage 1: cheap pre-filter (no depth I/O)
+        prefiltered = []
+        original_shape = (img_h, img_w, 3)
+        for data in matched_data:
+            fidx_scan = data["frame_index"]
+            intr = frame_intrinsics[fidx_scan]
+            # Check all annotations pass cheap geometric test
+            all_pass = True
+            for va in valid_annots:
+                if not cheap_visibility_check(
+                    points_original, va["indices"], data["pose"], intr, original_shape,
+                    edge_margin_ratio=edge_margin_ratio, max_depth=max_depth,
+                ):
+                    all_pass = False
+                    break
+            if all_pass:
+                prefiltered.append(data)
 
-        for data in tqdm(matched_data, desc="    Scanning frames", leave=False):
-            rgb_img, intr = get_frame_intrinsics(data)
-            original_shape = rgb_img.shape
+        print(f"  Pre-filter: {len(prefiltered)}/{len(matched_data)} frames pass ({time.time()-t_desc:.1f}s)")
 
-            depth_map = dataParser.read_depth_frame(data["depth_path"])
-            if depth_map.shape[0] != original_shape[0] or depth_map.shape[1] != original_shape[1]:
-                depth_map = cv2.resize(
-                    depth_map, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_NEAREST
-                )
+        # Stage 2: full check with depth (only on pre-filtered frames)
+        candidates = []
+        for data in prefiltered:
+            fidx_scan = data["frame_index"]
+            intr = frame_intrinsics[fidx_scan]
+            depth_map = get_depth(fidx_scan)
 
-            # Project all annotations in this frame
             frame_results = []
             all_visible = True
             for va in valid_annots:
@@ -474,6 +561,17 @@ def main(
                 if not is_visible:
                     all_visible = False
                     break
+                # Check motion origin projects into image
+                md = va["motion"]
+                if md is not None:
+                    origin_idx = md.get("motion_origin_idx")
+                    if origin_idx is not None and origin_idx < len(points_original):
+                        origin_2d = project_point_3d_to_2d(
+                            points_original[origin_idx], data["pose"], intr, original_shape
+                        )
+                        if origin_2d is None:
+                            all_visible = False
+                            break
                 frame_results.append((mask, vis_ratio))
 
             if not all_visible:
@@ -481,6 +579,8 @@ def main(
 
             score = min(r[1] for r in frame_results)
             candidates.append((score, data["frame_index"], data, intr, frame_results))
+
+        print(f"  Full check: {len(candidates)} valid (depth loaded: {len(frame_depth_cache)}, {time.time()-t_desc:.1f}s)")
 
         if len(candidates) == 0:
             print(f"  No frame found where all annotations are visible, skipping")
@@ -503,18 +603,33 @@ def main(
         # Save each selected viewpoint
         for view_idx, (score, fidx, sel_data, sel_intr, sel_results) in enumerate(selected):
             rgb_img = imageio.imread(sel_data["rgb_path"])
-            h_img, w_img = rgb_img.shape[:2]
+            h_orig, w_orig = rgb_img.shape[:2]
+
+            # Resize output image and compute scaled dimensions
+            s = output_scale
+            w_img = int(round(w_orig * s))
+            h_img = int(round(h_orig * s))
+            if s != 1.0:
+                rgb_img = cv2.resize(rgb_img, (w_img, h_img), interpolation=cv2.INTER_AREA)
+
+            # Scale intrinsics to match output resolution
+            out_intr = (sel_intr[0] * s, sel_intr[1] * s, sel_intr[2] * s, sel_intr[3] * s)
 
             # World-to-camera rotation (for converting motion direction)
             world_to_cam = np.linalg.inv(sel_data["pose"])
             R_w2c = world_to_cam[:3, :3]
 
-            # Build solution items and combined mask
+            # Build solution items and combined mask (at output resolution)
             solution = []
             combined_mask = np.zeros((h_img, w_img), dtype=np.uint8)
             motion_arrows = []  # for visualization: (origin_2d, direction_2d, motion_type)
 
-            for va, (mask, vis_ratio) in zip(valid_annots, sel_results):
+            for va, (mask_orig, vis_ratio) in zip(valid_annots, sel_results):
+                # Resize mask to output resolution
+                if s != 1.0:
+                    mask = cv2.resize(mask_orig, (w_img, h_img), interpolation=cv2.INTER_NEAREST)
+                else:
+                    mask = mask_orig
                 combined_mask = np.maximum(combined_mask, mask)
 
                 # Extract bbox and point from mask
@@ -548,7 +663,7 @@ def main(
                     if origin_idx is not None and origin_idx < len(points_original):
                         origin_3d_world = points_original[origin_idx]
                         origin_2d = project_point_3d_to_2d(
-                            origin_3d_world, sel_data["pose"], sel_intr, rgb_img.shape
+                            origin_3d_world, sel_data["pose"], out_intr, rgb_img.shape
                         )
                         # Also store origin in camera coordinates
                         origin_cam = world_to_cam @ np.append(origin_3d_world, 1.0)
@@ -557,13 +672,18 @@ def main(
                     if origin_2d is not None:
                         item["motion_origin_2d"] = origin_2d
 
-                        # Compute 2D arrow for visualization using camera-space direction
+                        # Compute 2D motion axis: project origin + direction offset, then normalize
                         origin_3d_world = points_original[origin_idx]
                         axis_end_3d = origin_3d_world + np.array(md["motion_dir"]) * 0.15
                         axis_end_2d = project_point_3d_to_2d(
-                            axis_end_3d, sel_data["pose"], sel_intr, rgb_img.shape
+                            axis_end_3d, sel_data["pose"], out_intr, rgb_img.shape
                         )
                         if axis_end_2d is not None:
+                            dx = axis_end_2d[0] - origin_2d[0]
+                            dy = axis_end_2d[1] - origin_2d[1]
+                            norm_2d = (dx**2 + dy**2) ** 0.5
+                            if norm_2d > 1e-6:
+                                item["motion_axis_2d"] = [round(dx / norm_2d, 4), round(dy / norm_2d, 4)]
                             motion_arrows.append((origin_2d, axis_end_2d, md["motion_type"]))
 
                     # Generate 5-point trajectory in motion-origin local frame
@@ -605,13 +725,21 @@ def main(
 
                 solution.append(item)
 
-            # Save image and mask
+            # Save image, mask, and depth
             sample_id = f"{visit_id}_{video_id}_{desc_id[:8]}_v{view_idx}"
             img_filename = f"{sample_id}.jpg"
             mask_filename = f"{sample_id}.png"
+            depth_filename = f"{sample_id}.png"
 
             imageio.imwrite(images_dir / img_filename, rgb_img)
             imageio.imwrite(masks_dir / mask_filename, combined_mask)
+
+            # Save depth as uint16 PNG (meters -> mm)
+            depth_raw = get_depth(fidx)
+            depth_mm = np.clip(depth_raw * 1000.0, 0, 65535).astype(np.uint16)
+            if s != 1.0:
+                depth_mm = cv2.resize(depth_mm, (w_img, h_img), interpolation=cv2.INTER_NEAREST)
+            cv2.imwrite(str(depth_dir / depth_filename), depth_mm)
 
             # Save visualization with motion arrows
             vis_img = create_visualization(
@@ -634,6 +762,7 @@ def main(
                 "solution": solution,
                 "image": f"images/{img_filename}",
                 "mask": f"masks/{mask_filename}",
+                "depth": f"depths/{depth_filename}",
                 "img_height": h_img,
                 "img_width": w_img,
                 "aff_name": aff_names[0] if len(aff_names) == 1 else aff_names,
@@ -647,7 +776,7 @@ def main(
                     "frame_index": fidx,
                     "view_index": view_idx,
                     "timestamp": sel_data["timestamp"],
-                    "intrinsics": list(sel_intr),
+                    "intrinsics": list(out_intr),
                     "visibility_ratio": round(score, 3),
                 },
             }
@@ -668,7 +797,7 @@ def main(
     with open(dataset_path, "w", encoding="utf-8") as f:
         json.dump(records, f, indent=2, ensure_ascii=False)
 
-    print(f"\nDone! {len(records)} total records in {dataset_path}")
+    print(f"\nDone! {len(records)} total records in {dataset_path} ({time.time()-t_start:.1f}s total)")
 
 
 if __name__ == "__main__":

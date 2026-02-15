@@ -25,8 +25,6 @@ import tyro
 import viser
 
 SCENEFUN3D_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../third_party/scenefun3d"))
-sys.path.insert(0, SCENEFUN3D_ROOT)
-from utils.data_parser import DataParser
 
 
 # Distinct colors for multiple annotations (RGB 0-255)
@@ -107,29 +105,29 @@ def create_2d_vis(rgb, mask, solution, alpha=0.5):
             cv2.circle(vis, tuple(pt), 5, color, -1)
             cv2.circle(vis, tuple(pt), 5, (255, 255, 255), 1)
 
-        # Motion arrow
+        # Motion arrow (use motion_axis_2d if available, fallback to 3D axis X,Y)
         origin_2d = item.get("motion_origin_2d")
         motion_type = item.get("motion_type")
+        motion_axis_2d = item.get("motion_axis_2d")
         motion_axis = item.get("motion_axis")
-        if origin_2d is not None and motion_axis is not None:
+        if origin_2d is not None and (motion_axis_2d is not None or motion_axis is not None):
             m_color = (255, 100, 0) if motion_type == "rot" else (0, 100, 255)
-            # Draw arrow using stored 2D origin; approximate end from axis direction
-            # We just draw from origin in direction of first two axis components (screen direction)
             ox, oy = origin_2d
-            # Use a fixed pixel length for the arrow
             arrow_len = 60
-            # motion_axis is in camera coords: X=right, Y=down, Z=forward
-            # For 2D arrow, use X and Y components
-            ax = motion_axis[0]
-            ay = motion_axis[1]
-            norm = np.sqrt(ax ** 2 + ay ** 2)
-            if norm > 1e-6:
-                dx = int(ax / norm * arrow_len)
-                dy = int(ay / norm * arrow_len)
+            if motion_axis_2d is not None:
+                ax, ay = motion_axis_2d
+            else:
+                ax, ay = motion_axis[0], motion_axis[1]
+                norm = np.sqrt(ax ** 2 + ay ** 2)
+                if norm > 1e-6:
+                    ax, ay = ax / norm, ay / norm
+                else:
+                    ax, ay = 0, 0
+            dx = int(ax * arrow_len)
+            dy = int(ay * arrow_len)
+            if abs(dx) + abs(dy) > 0:
                 cv2.arrowedLine(vis, (ox, oy), (ox + dx, oy + dy), m_color, 3, tipLength=0.3)
                 cv2.circle(vis, (ox, oy), 6, m_color, -1)
-
-                # Label motion type
                 cv2.putText(vis, motion_type, (ox + 8, oy - 8), font, 0.5, m_color, 1, cv2.LINE_AA)
 
         # Trajectory (project from motion-origin local frame to 2D)
@@ -173,7 +171,7 @@ def create_2d_vis(rgb, mask, solution, alpha=0.5):
 
 def main(
     dataset_json: Annotated[str, tyro.conf.arg(help="Path to processed dataset.json")],
-    data_dir: Annotated[str, tyro.conf.arg(help="Path to original SceneFun3D data directory")],
+    data_dir: Annotated[str, tyro.conf.arg(help="Path to original SceneFun3D data directory (optional if depths/ exists)")] = "",
     downsample: Annotated[int, tyro.conf.arg(help="Pixel stride for point cloud subsampling")] = 4,
     point_size: Annotated[float, tyro.conf.arg(help="Point size for visualization")] = 0.005,
     port: Annotated[int, tyro.conf.arg(help="Viser server port")] = 8080,
@@ -188,7 +186,17 @@ def main(
         return
 
     base_dir = os.path.dirname(dataset_json)
-    data_parser = DataParser(data_dir)
+
+    # Check if saved depths are available
+    has_saved_depths = "depth" in records[0]
+    data_parser = None
+    if data_dir:
+        sys.path.insert(0, SCENEFUN3D_ROOT)
+        from utils.data_parser import DataParser
+        data_parser = DataParser(data_dir)
+    elif not has_saved_depths:
+        print("Error: no depths/ in dataset and no --data-dir specified")
+        return
 
     # Create viser server
     server = viser.ViserServer(port=port)
@@ -266,23 +274,31 @@ def main(
             plotly_handle.visible = False
 
         # --- Load depth for 3D ---
-        cache_key = (meta["visit_id"], meta["video_id"])
-        if cache_key not in depth_cache:
-            try:
-                depth_frames = data_parser.get_depth_frames(
-                    meta["visit_id"], meta["video_id"], data_asset_identifier="hires_depth"
-                )
-                depth_cache[cache_key] = depth_frames
-            except FileNotFoundError:
-                depth_cache[cache_key] = {}
-        depth_frames = depth_cache[cache_key]
-
-        timestamp = meta["timestamp"]
-        if timestamp not in depth_frames:
+        depth = None
+        if "depth" in record:
+            # Use saved depth (uint16 PNG, millimeters)
+            depth_path = os.path.join(base_dir, record["depth"])
+            if os.path.exists(depth_path):
+                depth_mm = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                depth = depth_mm.astype(np.float64) / 1000.0  # mm -> meters
+        if depth is None and data_parser is not None:
+            # Fallback: load from original dataset
+            cache_key = (meta["visit_id"], meta["video_id"])
+            if cache_key not in depth_cache:
+                try:
+                    depth_frames = data_parser.get_depth_frames(
+                        meta["visit_id"], meta["video_id"], data_asset_identifier="hires_depth"
+                    )
+                    depth_cache[cache_key] = depth_frames
+                except FileNotFoundError:
+                    depth_cache[cache_key] = {}
+            depth_frames = depth_cache[cache_key]
+            timestamp = meta["timestamp"]
+            if timestamp in depth_frames:
+                depth = data_parser.read_depth_frame(depth_frames[timestamp])
+        if depth is None:
             print(f"Warning: no depth for {record['id']}")
             return
-
-        depth = data_parser.read_depth_frame(depth_frames[timestamp])
         if depth.shape[0] != h_img or depth.shape[1] != w_img:
             depth = cv2.resize(depth, (w_img, h_img), interpolation=cv2.INTER_NEAREST)
 
@@ -439,13 +455,14 @@ def main(
                     ])
                     pt_sizes = np.array([pt_size.value * (3.5 - 2.0 * i / max(n - 1, 1)) for i in range(n)])
 
-                    # Add each point separately for different sizes
+                    # Add each point separately for different sizes (rounded shape)
                     for i in range(n):
                         server.scene.add_point_cloud(
                             f"motions/traj_pt_{ann_idx}_{i}",
                             points=traj_centered[i:i + 1].astype(np.float32),
                             colors=pt_colors[i:i + 1],
                             point_size=float(pt_sizes[i]),
+                            point_shape="rounded",
                         )
 
     # Register callbacks
