@@ -35,8 +35,8 @@ worker:
       optimizer_offload: false
       torch_dtype: bf16
     offload:
-      param_offload: true
-      optimizer_offload: true
+      param_offload: false
+      optimizer_offload: false
 
   rollout:
     temperature: 1.0
@@ -47,7 +47,7 @@ worker:
 
   ref:
     offload:
-      param_offload: true
+      param_offload: false
 
   reward:
     reward_type: function
