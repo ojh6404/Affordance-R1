@@ -22,10 +22,13 @@ from verl.utils.reward_score import math_compute_score, r1v_compute_score, seg_c
 
 
 class CustomRewardManager:
-    def __init__(self, tokenizer: PreTrainedTokenizer, num_examine: int, compute_score: str):
+    def __init__(self, tokenizer: PreTrainedTokenizer, num_examine: int, compute_score: str, curriculum: bool = False):
         self.tokenizer = tokenizer
         self.num_examine = num_examine
+        self.curriculum = curriculum
         self.sim_model = KeyedVectors.load_word2vec_format('NathaNn1111/word2vec-google-news-negative-300-bin/GoogleNews-vectors-negative300.bin', binary=True)
+        self.step = 0
+        self.total_steps = 1
         if compute_score == "math":
             self.compute_score = math_compute_score
         elif compute_score == "r1v":
@@ -68,7 +71,8 @@ class CustomRewardManager:
 
             # print(ground_truth,response_str)
 
-            score = self.compute_score(response_str, ground_truth,aff_truth,part_truth,self.sim_model)
+            progress = self.step / max(self.total_steps, 1) if self.curriculum else 1.0
+            score = self.compute_score(response_str, ground_truth, aff_truth, part_truth, self.sim_model, progress=progress)
             reward_tensor[i, valid_response_length - 1] = score
 
             if already_print < self.num_examine:

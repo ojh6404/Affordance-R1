@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import math
+import os
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -88,7 +90,14 @@ class RLHFDataset(Dataset):
         self.min_pixels = min_pixels
 
         #self.dataset = load_dataset(data_path)['train']
-        self.dataset = load_from_disk(data_path)['train'] # you can load from disk if you have already downloaded the dataset
+        if data_path.endswith(".json"):
+            with open(data_path, "r", encoding="utf-8") as f:
+                self.dataset = json.load(f)
+            self._json_base_dir = os.path.dirname(data_path)
+            self._is_json = True
+        else:
+            self.dataset = load_from_disk(data_path)['train']
+            self._is_json = False
         
         ################ Old Version ################
         # self.user_prompt = "<image>" \
@@ -131,8 +140,16 @@ class RLHFDataset(Dataset):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
-        row_dict = self.dataset[index]
-        
+        row_dict = dict(self.dataset[index])
+
+        if self._is_json:
+            # Convert relative image path to PIL Image
+            if "image" in row_dict and isinstance(row_dict["image"], str):
+                row_dict["image"] = Image.open(os.path.join(self._json_base_dir, row_dict["image"]))
+            # Convert parsed solution back to JSON string for reward compatibility
+            if "solution" in row_dict and not isinstance(row_dict["solution"], str):
+                row_dict["solution"] = json.dumps(row_dict["solution"])
+
         ################ Old Version ################
         # messages = [
         #     {"role": "system", "content": self.system_prompt},

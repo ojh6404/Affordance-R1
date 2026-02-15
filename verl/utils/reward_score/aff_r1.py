@@ -4,9 +4,10 @@ from scipy.optimize import linear_sum_assignment
 import numpy as np
 
 def aff_r1_score_format_reward(predict_str: str) -> float:
-    pattern = r"<think>.*?</think>\s*<rethink>.*?</rethink>\s*<answer>.*?</answer>"
+    # Require non-empty content (at least one non-whitespace char) inside think and rethink
+    pattern = r"<think>\s*\S[\s\S]*?</think>\s*<rethink>\s*\S[\s\S]*?</rethink>\s*<answer>.*?</answer>"
     match = re.fullmatch(pattern, predict_str, re.DOTALL)
-    thinking_format_reward = 1.0 if match else 0.0 
+    thinking_format_reward = 1.0 if match else 0.0
     
     def segmentation_format(predict_str: str) -> float:
         segmentation_format_reward = 0.0
@@ -50,61 +51,75 @@ def aff_r1_score_format_reward(predict_str: str) -> float:
     
     return thinking_format_reward + segmentation_format_reward
 
-def aff_r1_score_accuracy_reward(predict_str: str, ground_truth: str) -> float:
+def aff_r1_score_accuracy_reward(predict_str: str, ground_truth: str, progress: float = 1.0) -> float:
+    """Compute accuracy reward with curriculum thresholds.
+
+    Args:
+        progress: training progress 0.0 (start) to 1.0 (end).
+            Thresholds interpolate from easy to hard:
+              IoU:        0.3  -> 0.65
+              L1:         30   -> 10
+              Point dist: 60   -> 30
+    """
     max_accuracy_reward = 0.0
     MAX_OBJECTS = 120  # 设置上限
-    
+
+    # Curriculum: linearly interpolate thresholds
+    p = max(0.0, min(1.0, progress))
+    iou_thresh = 0.3 + (0.65 - 0.3) * p        # 0.3 -> 0.65
+    l1_thresh = 30.0 + (10.0 - 30.0) * p        # 30  -> 10
+    point_thresh = 60.0 + (30.0 - 60.0) * p     # 60  -> 30
+
     try:
         gt_data = json.loads(ground_truth)
         gt_bboxes = [item['bbox_2d'] for item in gt_data]
         gt_points = [item['point_2d'] for item in gt_data]
-            
-        #json_match = re.search(r'```json\s*(.*?)\s*```', predict_str, re.DOTALL)
+
         json_match = re.search(r'<answer>\s*(.*?)\s*</answer>', predict_str, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(1))
             pred_bboxes = [item['bbox_2d'] for item in data]
             pred_points = [item['point_2d'] for item in data]
-            
+
             # 只有当预测或真实值超过上限时才截断
             if len(pred_bboxes) > MAX_OBJECTS:
                 pred_bboxes = pred_bboxes[:MAX_OBJECTS]
                 pred_points = pred_points[:MAX_OBJECTS]
-            
+
             if len(gt_bboxes) > MAX_OBJECTS:
                 gt_bboxes = gt_bboxes[:MAX_OBJECTS]
                 gt_points = gt_points[:MAX_OBJECTS]
-            
+
             # 预处理数据为numpy数组
             pred_bboxes = np.array(pred_bboxes)  # (M,4)
             pred_points = np.array(pred_points)  # (M,2)
             gt_bboxes = np.array(gt_bboxes)    # (N,4)
             gt_points = np.array(gt_points)     # (N,2)
-            
+
             # 并行计算所有指标
             iou_matrix = batch_iou(pred_bboxes, gt_bboxes)  # (M,N)
             l1_matrix = batch_l1_distance(pred_bboxes, gt_bboxes)  # (M,N)
             points_dist_matrix = batch_points_distance(pred_points, gt_points)  # (M,N)
             points_in_box = batch_points_in_box(pred_points, pred_bboxes)  # (M,)
-            
-            # 计算reward矩阵
-            iou_reward = (iou_matrix > 0.65).astype(float)
-            bbox_l1_reward = (l1_matrix < 10).astype(float)
-            point_reward = ((points_dist_matrix < 30) & points_in_box[:,np.newaxis]).astype(float)
-            
+
+            # 计算reward矩阵 (curriculum thresholds)
+            iou_reward = (iou_matrix > iou_thresh).astype(float)
+            bbox_l1_reward = (l1_matrix < l1_thresh).astype(float)
+            point_reward = ((points_dist_matrix < point_thresh) & points_in_box[:,np.newaxis]).astype(float)
+
             # 构建最终的cost矩阵
             cost_matrix = 3.0 - (iou_reward + bbox_l1_reward + point_reward)
-            
+
             # 使用匈牙利算法找最优匹配
             row_indices, col_indices = linear_sum_assignment(cost_matrix)
-            
+
             # 直接从cost_matrix计算总reward
             total_reward = len(row_indices) * 3.0 - cost_matrix[row_indices, col_indices].sum()
-            
+
             # 计算平均reward
             max_length = max(len(pred_bboxes), len(gt_bboxes))
             max_accuracy_reward = total_reward / max_length
-            
+
     except Exception:
         pass
     return max_accuracy_reward
@@ -172,7 +187,7 @@ def part_reward_compute_score(predict_str:str, affordance_truth: str,sim_model):
     return max_accuracy_reward
 
 
-def aff_r1_score(predict_str: str, ground_truth: str,affordance_truth: str,part_truth: str,sim_model) -> float:
+def aff_r1_score(predict_str: str, ground_truth: str, affordance_truth: str, part_truth: str, sim_model, progress: float = 1.0) -> float:
     # print(predict_str, ground_truth)
     # 新增：判断 bbox 个数是否与 gt 相同的奖励
     bbox_count_reward = 0.0  # 默认奖励为0
@@ -197,7 +212,7 @@ def aff_r1_score(predict_str: str, ground_truth: str,affordance_truth: str,part_
         pass
     
     format_reward = aff_r1_score_format_reward(predict_str)
-    accuracy_reward = aff_r1_score_accuracy_reward(predict_str, ground_truth)
+    accuracy_reward = aff_r1_score_accuracy_reward(predict_str, ground_truth, progress=progress)
     non_repeat_reward = aff_r1_score_non_repeat_reward(predict_str)
     aff_reward = aff_reward_compute_score(predict_str,affordance_truth,sim_model)
     # part_reward = part_rewarf_compute_score(predict_str,part_truth,sim_model)

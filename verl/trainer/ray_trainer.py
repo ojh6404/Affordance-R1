@@ -671,6 +671,11 @@ class RayPPOTrainer:
                 if self.global_steps >= self.training_steps:
                     break
 
+                # Update reward curriculum progress
+                if hasattr(self.reward_fn, "step"):
+                    self.reward_fn.step = self.global_steps
+                    self.reward_fn.total_steps = self.training_steps
+
                 metrics = {}
                 timing_raw = {}
 
