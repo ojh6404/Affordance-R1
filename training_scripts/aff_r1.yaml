@@ -1,5 +1,5 @@
 data:
-  train_files: Affordance-R1/train
+  train_files: reasonaff/train_new
   val_files: None
   prompt_key: problem
   max_prompt_length: 1500
@@ -24,7 +24,8 @@ worker:
     kl_loss_coef: 5.0e-3
     kl_loss_type: low_var_kl
     model:
-      model_path: Qwen/Qwen2.5-VL-7B-Instruct
+      model_path: ./pretrained
+      use_liger: true
       enable_gradient_checkpointing: true
     optim:
       lr: 1.0e-6
@@ -51,14 +52,15 @@ worker:
   reward:
     reward_type: function
     compute_score: aff_r1
+    curriculum: false
 
 trainer:
   total_episodes: 1
-  logger: ["console", "swanlab"]
+  logger: ["console", "wandb"]
   project_name: easy_r1
-  n_gpus_per_node: 8
+  n_gpus_per_node: 2
   nnodes: 1
-  save_freq: 100
+  save_freq: 500
   test_freq: 100000
   val_before_train: false
   val_only: false
