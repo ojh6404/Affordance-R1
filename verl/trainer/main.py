@@ -70,9 +70,8 @@ def main_task(config: PPOConfig):
         Role.RefPolicy: global_pool_id,
     }
 
-    curriculum = getattr(config.worker.reward, "curriculum", False)
     reward_fn = CustomRewardManager(
-        tokenizer=tokenizer, num_examine=1, compute_score=config.worker.reward.compute_score, curriculum=curriculum
+        tokenizer=tokenizer, num_examine=1, compute_score=config.worker.reward.compute_score, curriculum=config.worker.reward.curriculum
     )
     
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)

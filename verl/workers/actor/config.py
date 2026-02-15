@@ -26,6 +26,7 @@ class ModelConfig:
     override_config: Dict[str, Any] = field(default_factory=dict)
     enable_gradient_checkpointing: bool = True
     trust_remote_code: bool = True
+    use_liger: bool = False
 
     def post_init(self):
         if self.tokenizer_path is None:

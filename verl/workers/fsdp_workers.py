@@ -163,6 +163,15 @@ class FSDPWorker(Worker):
         else:
             torch_dtype = PrecisionType.to_dtype(fsdp_config.torch_dtype)
 
+        if model_config.use_liger:
+            try:
+                from liger_kernel.transformers import apply_liger_kernel_to_qwen2_5_vl
+
+                apply_liger_kernel_to_qwen2_5_vl()
+                self.print_rank0("Liger kernel applied to Qwen2.5-VL")
+            except ImportError:
+                self.print_rank0("Warning: liger-kernel not installed, skipping liger kernel")
+
         if self._is_critic:
             auto_class = AutoModelForTokenClassification
         elif type(self.model_config) in AutoModelForVision2Seq._model_mapping.keys():

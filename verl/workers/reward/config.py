@@ -22,3 +22,4 @@ from dataclasses import dataclass
 class RewardConfig:
     reward_type: str = "function"
     compute_score: str = "math"
+    curriculum: bool = False
