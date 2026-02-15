@@ -158,15 +158,20 @@ def qwen2vl_dtensor_weight_loader(actor_weights: Dict[str, torch.Tensor], vllm_m
         if vllm_model.config.tie_word_embeddings and "lm_head.weight" in actor_name:
             continue
 
+        # Normalize transformers >= 4.52 naming (model.language_model.X -> model.X)
+        mapped_name = actor_name
+        if mapped_name.startswith("model.language_model."):
+            mapped_name = "model." + mapped_name[len("model.language_model."):]
+
         for vllm_substr, hf_substr, shard_id in stacked_params_mapping:
-            if hf_substr not in actor_name:
+            if hf_substr not in mapped_name:
                 continue
 
-            if "visual" in actor_name:
+            if "visual" in mapped_name:
                 continue
 
-            vllm_name = "language_model." + actor_name.replace(hf_substr, vllm_substr)
-            if actor_name.endswith(".bias") and actor_name not in vllm_params:
+            vllm_name = "language_model." + mapped_name.replace(hf_substr, vllm_substr)
+            if vllm_name not in vllm_params:
                 continue  # skip loading extra bias for GPTQ models
 
             local_actor_weight = redistribute_dtensor(param_name=actor_name, loaded_weights=actor_weight)
@@ -175,13 +180,13 @@ def qwen2vl_dtensor_weight_loader(actor_weights: Dict[str, torch.Tensor], vllm_m
             weight_loader(vllm_param, local_actor_weight.to(dtype=vllm_param.dtype), shard_id)
             break
         else:
-            if actor_name.endswith(".bias") and actor_name not in vllm_params:
-                continue  # skip loading extra bias for GPTQ models
-
-            if "visual" in actor_name:
-                vllm_name = actor_name.removeprefix("model.")
+            if "visual" in mapped_name:
+                vllm_name = mapped_name.removeprefix("model.")
             else:
-                vllm_name = "language_model." + actor_name
+                vllm_name = "language_model." + mapped_name
+
+            if vllm_name not in vllm_params:
+                continue  # skip params not present in vllm model
 
             vllm_param = vllm_params[vllm_name]
             local_actor_weight = redistribute_dtensor(param_name=actor_name, loaded_weights=actor_weight)
@@ -289,6 +294,10 @@ def _process_parameter_names(name):
     # Remove '.weight' if it exists at the end of the string
     if name.endswith(".weight"):
         name = name[:-7]
+
+    # Normalize transformers >= 4.52 naming (model.language_model.X -> model.X)
+    if name.startswith("model.language_model."):
+        name = "model." + name[len("model.language_model."):]
 
     # Remove 'model.layers.x.' or 'model.' prefix
     if "model.layers" in name:
