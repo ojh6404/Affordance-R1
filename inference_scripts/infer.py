@@ -13,6 +13,7 @@ import re
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -61,8 +62,7 @@ def main():
         args.reasoning_model_path,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
-        device_map="auto",
-    )
+    ).to("cuda")
         
     segmentation_model = SAM2ImagePredictor.from_pretrained(args.segmentation_model_path)
     
@@ -175,29 +175,34 @@ def main():
     
     plt.tight_layout()
     # plt.savefig(args.output_path)
-    draw_mask_on_image(image,mask_all,args.output_path)
-    plt.close() 
+    draw_mask_on_image(image, mask_all, bboxes, points, args.output_path)
+    plt.close()
 
 
-def draw_mask_on_image(image_path, mask, output_path):
-    # 打开图像并转换为 NumPy 数组
-    image = np.array(image_path.convert("RGB"))
-    
-    # # 确保图像和掩码的形状匹配
-    # assert image.shape[:2] == mask.shape, "图像和掩码的形状不匹配"
+def draw_mask_on_image(pil_image, mask, bboxes, points, output_path):
+    image = np.array(pil_image.convert("RGB"))
 
-    # 创建一个 Matplotlib 图形
     plt.figure(figsize=(10, 10))
     plt.imshow(image)
 
-    # 绘制掩码
+    # Draw mask overlay
     masked_image = np.zeros_like(image)
-    masked_image[mask] = [255, 0, 0]  # 将掩码区域设置为红色
-    plt.imshow(masked_image, alpha=0.5)  # 半透明叠加
+    masked_image[mask] = [255, 0, 0]
+    plt.imshow(masked_image, alpha=0.5)
 
-    # 保存结果
-    plt.axis('off')
-    plt.savefig(output_path, bbox_inches='tight', pad_inches=0)
+    ax = plt.gca()
+    # Draw bboxes
+    for bbox in bboxes:
+        x0, y0, x1, y1 = bbox
+        rect = mpatches.Rectangle((x0, y0), x1 - x0, y1 - y0, linewidth=2, edgecolor="lime", facecolor="none")
+        ax.add_patch(rect)
+
+    # Draw points
+    for pt in points:
+        ax.plot(pt[0], pt[1], "o", color="cyan", markersize=8, markeredgecolor="black", markeredgewidth=1.5)
+
+    plt.axis("off")
+    plt.savefig(output_path, bbox_inches="tight", pad_inches=0)
     plt.close()
 
 
