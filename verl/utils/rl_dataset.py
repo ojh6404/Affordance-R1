@@ -15,6 +15,7 @@
 import json
 import math
 import os
+import random
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -131,12 +132,84 @@ class RLHFDataset(Dataset):
             "<rethink> rethinking process here </rethink>," \
             "<answer>{Answer}</answer>"
 
+        _motion_instructions = (
+            "For \"trans\" (translation), the object moves along the motion axis direction. "
+            "For \"rot\" (rotation), the object rotates around the motion axis. "
+            "motion_axis_2d is represented as two image points [[x1,y1],[x2,y2]] that define the axis line; point order does not matter."
+        )
+        _thinking_instructions = (
+            "In <think>, reason about which part of the object to interact with and where it is located (bounding box, point, affordance). "
+            "In <rethink>, reason about how the part moves: its motion type and axis direction. "
+            "Output the final answer in <answer> </answer> tags in JSON format."
+        )
+        _answer_example = (
+            "i.e., <think> identify the interactable part and its location </think>,"
+            "<rethink> analyze the motion: type and axis </rethink>,"
+            "<answer>{AnswerMotion}</answer>"
+        )
+        self.user_prompts_motion = [
+            # Variant 1: direct task description
+            "<image>\n"
+            "Please answer \"{Question}\" with bboxs, points, and motion prediction. "
+            "Analyze the functional properties of specific parts of each object in the image and carefully find all the part(s) that matches the problem. "
+            "For each matched object, predict the bounding box of the interactable part, "
+            "a point on that part, affordance type, motion type (rot or trans), "
+            "and two points defining the motion axis in 2D image coordinates. "
+            + _motion_instructions + _thinking_instructions + _answer_example,
+
+            # Variant 2: emphasize localization first
+            "<image>\n"
+            "Given the task \"{Question}\", locate the relevant object part(s) in the image and predict their motion. "
+            "For each part, output: bounding box, interaction point, affordance label, "
+            "motion type (choose between rot and trans), "
+            "and two points on the motion axis in pixel coordinates. "
+            + _motion_instructions + _thinking_instructions + _answer_example,
+
+            # Variant 3: step-by-step framing
+            "<image>\n"
+            "Task: \"{Question}\". "
+            "Step 1: Identify which part(s) of the object you would interact with. "
+            "Step 2: For each part, predict its bounding box, a contact point, and the affordance type. "
+            "Step 3: Determine the motion — type (rot or trans) "
+            "and axis defined by two image points. "
+            + _motion_instructions + _thinking_instructions + _answer_example,
+
+            # Variant 4: question-answer style
+            "<image>\n"
+            "How would you perform the following action: \"{Question}\"? "
+            "Find the interactable part(s) and describe both their location and motion. "
+            "For each part, provide: bbox, point, affordance, motion type (rot/trans), "
+            "and motion axis as two pixel points. "
+            + _motion_instructions + _thinking_instructions + _answer_example,
+
+            # Variant 5: concise instruction
+            "<image>\n"
+            "\"{Question}\" — identify the relevant part(s) and predict their affordance and motion. "
+            "Output for each: bounding box, interaction point, affordance type, "
+            "motion type (rot or trans), "
+            "and two points defining the motion axis in image coordinates. "
+            + _motion_instructions + _thinking_instructions + _answer_example,
+
+            # Variant 6: functional reasoning emphasis
+            "<image>\n"
+            "Analyze the image to answer: \"{Question}\". "
+            "Reason about which object parts are functionally relevant and how they move. "
+            "Predict each part's bounding box, contact point, affordance label, "
+            "motion type (rot for rotation, trans for translation), "
+            "and the motion axis via two image points. "
+            + _motion_instructions + _thinking_instructions + _answer_example,
+        ]
+
     def _load_json(self, json_path: str):
         """Load dataset from a JSON file with image/mask paths."""
         self._is_json = True
         self._json_dir = os.path.dirname(json_path)
         with open(json_path, "r") as f:
             self.dataset = json.load(f)
+        # Detect motion fields in dataset
+        self._has_motion = False
+        if self.dataset and isinstance(self.dataset[0].get("solution"), list) and len(self.dataset[0]["solution"]) > 0:
+            self._has_motion = "motion_type" in self.dataset[0]["solution"][0]
         # Pre-serialize solution lists to JSON strings (reward code expects strings)
         for item in self.dataset:
             if isinstance(item.get("solution"), list):
@@ -158,13 +231,22 @@ class RLHFDataset(Dataset):
             if isinstance(row_dict.get("image"), str):
                 row_dict["image"] = Image.open(os.path.join(self._json_dir, row_dict["image"]))
 
+        if self._is_json and self._has_motion:
+            prompt_template = random.choice(self.user_prompts_motion)
+            user_content = prompt_template.format(
+                Question=row_dict["problem"].lower().strip("."),
+                AnswerMotion='[{"bbox_2d": [10,100,200,210], "point_2d": [30,110], "affordance": "turn on", '
+                '"motion_type": "rot", "motion_axis_2d": [[105,155],[105,55]]}]',
+            )
+        else:
+            user_content = self.user_prompt.format(
+                Question=row_dict["problem"].lower().strip("."),
+                Answer='[{"bbox_2d": [10,100,200,210], "point_2d": [30,110], "affordance": "hold"}, '
+                '{"bbox_2d": [225,296,706,786], "point_2d": [302,410], "affordance": "grasp"}]',
+            )
         messages = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": self.user_prompt.format(
-                Question=row_dict["problem"].lower().strip("."),
-                # Answer="[{\"bbox_2d\": [10,100,200,210], \"point_2d\": [30,110]}, {\"bbox_2d\": [225,296,706,786], \"point_2d\": [302,410]}]"
-                Answer="[{\"bbox_2d\": [10,100,200,210], \"point_2d\": [30,110], \"affordance\": \"hold\"}, {\"bbox_2d\": [225,296,706,786], \"point_2d\": [302,410], \"affordance\": \"grasp\"}]"
-            )},
+            {"role": "user", "content": user_content},
         ]
         prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 

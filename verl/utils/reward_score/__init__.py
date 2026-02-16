@@ -13,10 +13,12 @@
 # limitations under the License.
 
 
+from .aff_r1 import aff_r1_score
 from .math import math_compute_score
 from .r1v import r1v_compute_score
+from .scenefun3d import scenefun3d_score
 from .seg import seg_compute_score
 from .seg_restrict import seg_strict_compute_score
-from .aff_r1 import aff_r1_score
 
-__all__ = ["math_compute_score", "r1v_compute_score", "seg_compute_score", "seg_strict_compute_score", "aff_r1_score"]
+
+__all__ = ["math_compute_score", "r1v_compute_score", "seg_compute_score", "seg_strict_compute_score", "aff_r1_score", "scenefun3d_score"]

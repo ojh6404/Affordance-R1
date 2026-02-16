@@ -14,11 +14,18 @@
 
 
 import torch
-from transformers import PreTrainedTokenizer
 from gensim.models import KeyedVectors
+from transformers import PreTrainedTokenizer
 
 from verl import DataProto
-from verl.utils.reward_score import math_compute_score, r1v_compute_score, seg_compute_score, seg_strict_compute_score, aff_r1_score
+from verl.utils.reward_score import (
+    aff_r1_score,
+    math_compute_score,
+    r1v_compute_score,
+    scenefun3d_score,
+    seg_compute_score,
+    seg_strict_compute_score,
+)
 
 
 class CustomRewardManager:
@@ -36,6 +43,8 @@ class CustomRewardManager:
             self.compute_score = seg_strict_compute_score
         elif compute_score == "aff_r1":
             self.compute_score = aff_r1_score
+        elif compute_score == "scenefun3d":
+            self.compute_score = scenefun3d_score
         else:
             raise NotImplementedError()
 
