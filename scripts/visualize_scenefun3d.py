@@ -468,6 +468,19 @@ def main(
                             point_shape="rounded",
                         )
 
+        # --- Camera origin frame (coordinate axes) ---
+        if show_frustum.value:
+            cam_position = (-center).astype(np.float32)
+            server.scene.add_frame(
+                "camera/frame",
+                position=cam_position,
+                wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                show_axes=True,
+                axes_length=0.1,
+                axes_radius=0.005,
+                origin_radius=0.008,
+            )
+
         # --- Camera frustum ---
         if show_frustum.value:
             fov_y = 2.0 * np.arctan(h_img / (2.0 * fy))
