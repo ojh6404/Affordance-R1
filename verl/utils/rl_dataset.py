@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import math
+import os
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -87,8 +89,13 @@ class RLHFDataset(Dataset):
         self.max_pixels = max_pixels
         self.min_pixels = min_pixels
 
-        #self.dataset = load_dataset(data_path)['train']
-        self.dataset = load_from_disk(data_path)['train'] # you can load from disk if you have already downloaded the dataset
+        # Support both Arrow (load_from_disk) and JSON dataset formats
+        json_path = os.path.join(data_path, "dataset.json") if os.path.isdir(data_path) else data_path
+        if json_path.endswith(".json") and os.path.isfile(json_path):
+            self._load_json(json_path)
+        else:
+            self.dataset = load_from_disk(data_path)["train"]
+            self._is_json = False
         
         ################ Old Version ################
         # self.user_prompt = "<image>" \
@@ -124,6 +131,17 @@ class RLHFDataset(Dataset):
             "<rethink> rethinking process here </rethink>," \
             "<answer>{Answer}</answer>"
 
+    def _load_json(self, json_path: str):
+        """Load dataset from a JSON file with image/mask paths."""
+        self._is_json = True
+        self._json_dir = os.path.dirname(json_path)
+        with open(json_path, "r") as f:
+            self.dataset = json.load(f)
+        # Pre-serialize solution lists to JSON strings (reward code expects strings)
+        for item in self.dataset:
+            if isinstance(item.get("solution"), list):
+                item["solution"] = json.dumps(item["solution"])
+
     def __len__(self):
         return len(self.dataset)
 
@@ -132,15 +150,14 @@ class RLHFDataset(Dataset):
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
         row_dict = self.dataset[index]
-        
-        ################ Old Version ################
-        # messages = [
-        #     {"role": "system", "content": self.system_prompt},
-        #     {"role": "user", "content": self.user_prompt.format(Question=row_dict["problem"].lower().strip("."),
-        #                                                         Answer="{'bbox': [10,100,200,210], 'points_1': [30,110], 'points_2': [35,180]}")},
-        # ]
-        ################ Old Version ################
-        
+
+        # For JSON format, make a copy to avoid mutating the cached dataset,
+        # and resolve image path to a PIL Image
+        if self._is_json:
+            row_dict = dict(row_dict)
+            if isinstance(row_dict.get("image"), str):
+                row_dict["image"] = Image.open(os.path.join(self._json_dir, row_dict["image"]))
+
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": self.user_prompt.format(
