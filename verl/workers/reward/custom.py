@@ -51,8 +51,10 @@ class CustomRewardManager:
     def __call__(self, data: DataProto) -> torch.Tensor:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         already_print = 0
+        component_accum = {}
+        n_samples = len(data)
 
-        for i in range(len(data)):
+        for i in range(n_samples):
             data_item = data[i]  # DataProtoItem
 
             prompt_ids = data_item.batch["prompts"]
@@ -75,9 +77,17 @@ class CustomRewardManager:
 
             part_truth = data_item.non_tensor_batch["part_name"]
 
-            # print(ground_truth,response_str)
+            result = self.compute_score(response_str, ground_truth, aff_truth, part_truth, self.sim_model)
 
-            score = self.compute_score(response_str, ground_truth,aff_truth,part_truth,self.sim_model)
+            # Support both (score, components_dict) and plain score returns
+            if isinstance(result, tuple):
+                score, components = result
+                for k, v in components.items():
+                    component_accum.setdefault(k, 0.0)
+                    component_accum[k] += v
+            else:
+                score = result
+
             reward_tensor[i, valid_response_length - 1] = score
 
             if already_print < self.num_examine:
@@ -89,5 +99,13 @@ class CustomRewardManager:
                 print("[part_truth]", part_truth)
                 print("[score]", score)
                 print("[length]", len(response_str))
+
+        # Store per-component means for logging
+        if component_accum and n_samples > 0:
+            self.last_component_metrics = {
+                f"critic/rewards/{k}/mean": v / n_samples for k, v in component_accum.items()
+            }
+        else:
+            self.last_component_metrics = {}
 
         return reward_tensor

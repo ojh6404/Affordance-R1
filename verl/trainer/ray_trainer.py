@@ -752,6 +752,10 @@ class RayPPOTrainer:
                         reward_tensor = self.reward_fn(batch)
                         batch.batch["token_level_scores"] = reward_tensor
 
+                        # collect per-component reward metrics if available
+                        if hasattr(self.reward_fn, "last_component_metrics"):
+                            metrics.update(self.reward_fn.last_component_metrics)
+
                         # compute rewards. apply_kl_penalty if available
                         if not self.config.worker.actor.use_kl_loss:  # not grpo
                             batch, kl_metrics = apply_kl_penalty(

@@ -228,8 +228,9 @@ def scenefun3d_motion_accuracy_reward(predict_str: str, ground_truth: str) -> fl
 # ---------------------------------------------------------------------------
 
 
-def scenefun3d_score(predict_str: str, ground_truth: str, affordance_truth: str, part_truth: str, sim_model) -> float:
-    # === Original base rewards (max 10.0, same as aff_r1) ===
+def scenefun3d_score(predict_str: str, ground_truth: str, affordance_truth: str, part_truth: str, sim_model):
+    """Returns (total_reward, component_dict) when called normally."""
+    # === Original base rewards (max 11.0) ===
 
     # Bbox count reward (max 1.0)
     bbox_count_reward = 0.0
@@ -258,7 +259,16 @@ def scenefun3d_score(predict_str: str, ground_truth: str, affordance_truth: str,
         # motion accuracy (max 3.0)
         + motion_accuracy
     )
-    return reward
+
+    components = {
+        "format_reward": format_reward,
+        "accuracy_reward": accuracy_reward,
+        "non_repeat_reward": non_repeat_reward,
+        "aff_reward": aff_reward,
+        "bbox_count_reward": bbox_count_reward,
+        "motion_accuracy": motion_accuracy,
+    }
+    return reward, components
 
 
 if __name__ == "__main__":
@@ -277,8 +287,14 @@ if __name__ == "__main__":
         "motion_origin_2d": [321, 429],
         "motion_axis_2d": [-0.9984, -0.0573],
     }])
-    print("=== Rewards ===")
+    print("=== Individual Rewards ===")
     print("  format_reward:", scenefun3d_format_reward(predict_str), "/ 5.0")
     print("  accuracy_reward:", aff_r1_score_accuracy_reward(predict_str, ground_truth), "/ 3.0")
     print("  non_repeat_reward:", aff_r1_score_non_repeat_reward(predict_str), "/ 1.0")
     print("  motion_accuracy:", scenefun3d_motion_accuracy_reward(predict_str, ground_truth), "/ 3.0")
+
+    print("\n=== scenefun3d_score (tuple return) ===")
+    total, components = scenefun3d_score(predict_str, ground_truth, "rotate", "dial", sim_model=None)
+    print(f"  total: {total}")
+    for k, v in components.items():
+        print(f"  {k}: {v}")
