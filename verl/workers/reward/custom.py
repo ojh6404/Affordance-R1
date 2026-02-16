@@ -46,6 +46,9 @@ class CustomRewardManager:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         already_print = 0
 
+        # Per-component reward accumulators
+        reward_components = {}
+
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
 
@@ -63,16 +66,21 @@ class CustomRewardManager:
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
-            # ground_truth = data_item.non_tensor_batch["answer"]
             ground_truth = data_item.non_tensor_batch["solution"]
             aff_truth = data_item.non_tensor_batch["aff_name"]
-
             part_truth = data_item.non_tensor_batch["part_name"]
 
-            # print(ground_truth,response_str)
-
             progress = self.step / max(self.total_steps, 1) if self.curriculum else 1.0
-            score = self.compute_score(response_str, ground_truth, aff_truth, part_truth, self.sim_model, progress=progress)
+            result = self.compute_score(response_str, ground_truth, aff_truth, part_truth, self.sim_model, progress=progress)
+
+            if isinstance(result, dict):
+                score = result["total"]
+                for key, value in result.items():
+                    if key != "total":
+                        reward_components.setdefault(key, []).append(value)
+            else:
+                score = result
+
             reward_tensor[i, valid_response_length - 1] = score
 
             if already_print < self.num_examine:
@@ -84,5 +92,12 @@ class CustomRewardManager:
                 print("[part_truth]", part_truth)
                 print("[score]", score)
                 print("[length]", len(response_str))
+
+        # Compute per-component means for logging
+        self.last_reward_metrics = {}
+        for key, values in reward_components.items():
+            self.last_reward_metrics[f"critic/rewards/{key}/mean"] = sum(values) / len(values)
+            self.last_reward_metrics[f"critic/rewards/{key}/max"] = max(values)
+            self.last_reward_metrics[f"critic/rewards/{key}/min"] = min(values)
 
         return reward_tensor

@@ -215,14 +215,16 @@ def aff_r1_score(predict_str: str, ground_truth: str, affordance_truth: str, par
     accuracy_reward = aff_r1_score_accuracy_reward(predict_str, ground_truth, progress=progress)
     non_repeat_reward = aff_r1_score_non_repeat_reward(predict_str)
     aff_reward = aff_reward_compute_score(predict_str,affordance_truth,sim_model)
-    # part_reward = part_rewarf_compute_score(predict_str,part_truth,sim_model)
-    # affordance_reward = 0
-    # fruit = aff_reward + part_reward
-    # if fruit == 2:
-    #     affordance_reward  = 1
-    # 添加一个新的奖励条件
+
     reward = format_reward + accuracy_reward + non_repeat_reward + aff_reward + bbox_count_reward
-    return reward
+    return {
+        "total": reward,
+        "format": format_reward,
+        "accuracy": accuracy_reward,
+        "non_repeat": non_repeat_reward,
+        "affordance": aff_reward,
+        "bbox_count": bbox_count_reward,
+    }
 
 def batch_iou(boxes1, boxes2):
     # boxes1: (M,4), boxes2: (N,4)
