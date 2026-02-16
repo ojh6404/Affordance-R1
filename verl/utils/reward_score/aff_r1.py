@@ -6,7 +6,16 @@ import numpy as np
 def aff_r1_score_format_reward(predict_str: str) -> float:
     pattern = r"<think>.*?</think>\s*<rethink>.*?</rethink>\s*<answer>.*?</answer>"
     match = re.fullmatch(pattern, predict_str, re.DOTALL)
-    thinking_format_reward = 1.0 if match else 0.0 
+    thinking_format_reward = 0.0
+    if match:
+        thinking_format_reward = 1.0
+        # Penalize empty think/rethink (reward hacking prevention)
+        think_match = re.search(r"<think>(.*?)</think>", predict_str, re.DOTALL)
+        rethink_match = re.search(r"<rethink>(.*?)</rethink>", predict_str, re.DOTALL)
+        if think_match and len(think_match.group(1).strip()) < 10:
+            thinking_format_reward -= 0.5
+        if rethink_match and len(rethink_match.group(1).strip()) < 10:
+            thinking_format_reward -= 0.5
     
     def segmentation_format(predict_str: str) -> float:
         segmentation_format_reward = 0.0
