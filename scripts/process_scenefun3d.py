@@ -298,6 +298,19 @@ def create_visualization(
     return vis_image
 
 
+_AFFORDANCE_MAP = {
+    "hook_turn": "turn",
+    "hook_pull": "pull",
+    "key_press": "press",
+    "plug_in": "plug in",
+    "pinch_pull": "pull",
+    "tip_push": "push",
+    "foot_push": "push",
+    "unplug": "unplug",
+    "rotate": "rotate",
+}
+
+
 def main(
     data_dir: Annotated[str, tyro.conf.arg(help="Path to the dataset")],
     output_dir: Annotated[str, tyro.conf.arg(help="Output directory for rendered results")],
@@ -317,7 +330,9 @@ def main(
         int | None, tyro.conf.arg(help="Max viewpoints per description. None=all valid frames")
     ] = None,
     min_view_gap: Annotated[int, tyro.conf.arg(help="Minimum frame index gap between selected viewpoints")] = 5,
-    output_scale: Annotated[float, tyro.conf.arg(help="Scale factor for output image size (e.g., 0.667 for 2/3)")] = 2 / 3,
+    output_size: Annotated[int, tyro.conf.arg(help="Output image size NxN (e.g., 840)")] = 840,
+    adaptive_crop_scale: Annotated[float | None, tyro.conf.arg(help="Image-to-bbox scale for adaptive crop (e.g., 2.5 = output image is 2.5x the annotation bbox). None=fixed crop")] = None,
+    bbox_margin: Annotated[float, tyro.conf.arg(help="Margin ratio added around each bbox (e.g., 0.1 = 10%% of bbox size per side)")] = 0.1,
 ):
     t_start = time.time()
 
@@ -511,7 +526,7 @@ def main(
                     continue
             valid_annots.append({
                 "annot_id": annot_id,
-                "label": annot["label"].replace("_", " "),
+                "label": _AFFORDANCE_MAP.get(annot["label"], annot["label"].replace("_", " ")),
                 "indices": indices,
                 "motion": motion_map.get(annot_id),
             })
@@ -577,14 +592,85 @@ def main(
             if not all_visible:
                 continue
 
-            score = min(r[1] for r in frame_results)
-            candidates.append((score, data["frame_index"], data, intr, frame_results))
+            # Compute trajectory visibility score (fraction of trajectory points inside image)
+            traj_visible = 0
+            traj_total = 0
+            w2c = np.linalg.inv(data["pose"])
+            R_w2c_cand = w2c[:3, :3]
+            for va in valid_annots:
+                md = va["motion"]
+                if md is None:
+                    continue
+                origin_idx = md.get("motion_origin_idx")
+                if origin_idx is None or origin_idx >= len(points_original):
+                    continue
+                o_world = points_original[origin_idx]
+                o_cam = (w2c @ np.append(o_world, 1.0))[:3]
+                axis_cam = R_w2c_cand @ np.array(md["motion_dir"], dtype=np.float64)
+                axis_norm = np.linalg.norm(axis_cam)
+                if axis_norm > 1e-6:
+                    axis_cam = axis_cam / axis_norm
+
+                if md["motion_type"] == "rot":
+                    centroid_world = points_original[va["indices"]].mean(axis=0)
+                    centroid_cam = (w2c @ np.append(centroid_world, 1.0))[:3]
+                    p_rel = centroid_cam - o_cam
+                    max_angle = np.pi / 4
+                    for ti in range(5):
+                        theta = ti * max_angle / 4
+                        p_rot = (
+                            p_rel * np.cos(theta)
+                            + np.cross(axis_cam, p_rel) * np.sin(theta)
+                            + axis_cam * np.dot(axis_cam, p_rel) * (1 - np.cos(theta))
+                        )
+                        p_abs = o_cam + p_rot
+                        traj_total += 1
+                        if p_abs[2] > 0:
+                            fx_c, fy_c, cx_c, cy_c = intr
+                            u_c = p_abs[0] * fx_c / p_abs[2] + cx_c
+                            v_c = p_abs[1] * fy_c / p_abs[2] + cy_c
+                            if 0 <= u_c < original_shape[1] and 0 <= v_c < original_shape[0]:
+                                traj_visible += 1
+                elif md["motion_type"] == "trans":
+                    max_dist = 0.1
+                    for ti in range(5):
+                        t = ti * max_dist / 4
+                        p_abs = o_cam + axis_cam * t
+                        traj_total += 1
+                        if p_abs[2] > 0:
+                            fx_c, fy_c, cx_c, cy_c = intr
+                            u_c = p_abs[0] * fx_c / p_abs[2] + cx_c
+                            v_c = p_abs[1] * fy_c / p_abs[2] + cy_c
+                            if 0 <= u_c < original_shape[1] and 0 <= v_c < original_shape[0]:
+                                traj_visible += 1
+
+            traj_score = traj_visible / traj_total if traj_total > 0 else 1.0
+
+            # Compute sharpness score (Laplacian variance, higher = sharper)
+            rgb_cand = imageio.imread(data["rgb_path"])
+            gray_cand = cv2.cvtColor(rgb_cand, cv2.COLOR_RGB2GRAY)
+            # Downsample for speed
+            gray_small = cv2.resize(gray_cand, (0, 0), fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
+            sharpness = cv2.Laplacian(gray_small, cv2.CV_64F).var()
+
+            # Combined score: visibility (w=1.0) + trajectory (w=0.5) + sharpness component
+            score = min(r[1] for r in frame_results) + 0.5 * traj_score
+            candidates.append((score, data["frame_index"], data, intr, frame_results, sharpness))
 
         print(f"  Full check: {len(candidates)} valid (depth loaded: {len(frame_depth_cache)}, {time.time()-t_desc:.1f}s)")
 
         if len(candidates) == 0:
             print(f"  No frame found where all annotations are visible, skipping")
             continue
+
+        # Normalize sharpness across candidates and add to score (weight 0.3)
+        sharpness_values = [c[5] for c in candidates]
+        sharp_min, sharp_max = min(sharpness_values), max(sharpness_values)
+        sharp_range = sharp_max - sharp_min if sharp_max > sharp_min else 1.0
+        candidates = [
+            (c[0] + 0.3 * (c[5] - sharp_min) / sharp_range, c[1], c[2], c[3], c[4])
+            for c in candidates
+        ]
 
         # Sort by score descending, then select diverse views with min_view_gap
         frame_indices = sorted(c[1] for c in candidates)
@@ -605,15 +691,8 @@ def main(
             rgb_img = imageio.imread(sel_data["rgb_path"])
             h_orig, w_orig = rgb_img.shape[:2]
 
-            # Resize output image and compute scaled dimensions
-            s = output_scale
-            w_img = int(round(w_orig * s))
-            h_img = int(round(h_orig * s))
-            if s != 1.0:
-                rgb_img = cv2.resize(rgb_img, (w_img, h_img), interpolation=cv2.INTER_AREA)
-
-            # Scale intrinsics to match output resolution
-            out_intr = (sel_intr[0] * s, sel_intr[1] * s, sel_intr[2] * s, sel_intr[3] * s)
+            w_img, h_img = w_orig, h_orig
+            out_intr = sel_intr
 
             # World-to-camera rotation (for converting motion direction)
             world_to_cam = np.linalg.inv(sel_data["pose"])
@@ -625,11 +704,7 @@ def main(
             motion_arrows = []  # for visualization: (origin_2d, direction_2d, motion_type)
 
             for va, (mask_orig, vis_ratio) in zip(valid_annots, sel_results):
-                # Resize mask to output resolution
-                if s != 1.0:
-                    mask = cv2.resize(mask_orig, (w_img, h_img), interpolation=cv2.INTER_NEAREST)
-                else:
-                    mask = mask_orig
+                mask = mask_orig
                 combined_mask = np.maximum(combined_mask, mask)
 
                 # Extract bbox and point from mask
@@ -725,6 +800,103 @@ def main(
 
                 solution.append(item)
 
+            # Crop centered on combined mask centroid
+            ys_mask, xs_mask = np.where(combined_mask > 0)
+            if len(xs_mask) > 0:
+                cx_crop = int(np.mean(xs_mask))
+                cy_crop = int(np.mean(ys_mask))
+            else:
+                cx_crop, cy_crop = w_img // 2, h_img // 2
+
+            # Determine actual crop window size
+            img_min_side = min(w_img, h_img)
+            if adaptive_crop_scale is not None:
+                # actual_crop = max(bbox_w, bbox_h) * scale, clamped to [output_size, img_min_side]
+                bbox_w = int(xs_mask.max()) - int(xs_mask.min()) if len(xs_mask) > 0 else output_size
+                bbox_h = int(ys_mask.max()) - int(ys_mask.min()) if len(ys_mask) > 0 else output_size
+                actual_crop = min(max(int(max(bbox_w, bbox_h) * adaptive_crop_scale), output_size), img_min_side)
+            else:
+                actual_crop = min(output_size, img_min_side)
+
+            half = actual_crop // 2
+            # Clamp crop window to image bounds
+            crop_x0 = max(0, min(cx_crop - half, w_img - actual_crop))
+            crop_y0 = max(0, min(cy_crop - half, h_img - actual_crop))
+            crop_x1, crop_y1 = crop_x0 + actual_crop, crop_y0 + actual_crop
+            rgb_img = rgb_img[crop_y0:crop_y1, crop_x0:crop_x1]
+            combined_mask = combined_mask[crop_y0:crop_y1, crop_x0:crop_x1]
+
+            # Resize to output_size if actual crop is larger
+            if actual_crop != output_size:
+                resize_scale = output_size / actual_crop
+                rgb_img = cv2.resize(rgb_img, (output_size, output_size), interpolation=cv2.INTER_AREA)
+                combined_mask = cv2.resize(combined_mask, (output_size, output_size), interpolation=cv2.INTER_NEAREST)
+            else:
+                resize_scale = 1.0
+
+            # Adjust all 2D coordinates in solution (crop offset, then resize scale)
+            for item in solution:
+                b = item["bbox_2d"]
+                bx0 = int((b[0] - crop_x0) * resize_scale)
+                by0 = int((b[1] - crop_y0) * resize_scale)
+                bx1 = int((b[2] - crop_x0) * resize_scale)
+                by1 = int((b[3] - crop_y0) * resize_scale)
+                mw = int((bx1 - bx0) * bbox_margin)
+                mh = int((by1 - by0) * bbox_margin)
+                item["bbox_2d"] = [
+                    max(0, bx0 - mw),
+                    max(0, by0 - mh),
+                    min(output_size, bx1 + mw),
+                    min(output_size, by1 + mh),
+                ]
+                p = item["point_2d"]
+                item["point_2d"] = [
+                    int((p[0] - crop_x0) * resize_scale),
+                    int((p[1] - crop_y0) * resize_scale),
+                ]
+                if "motion_origin_2d" in item:
+                    mo = item["motion_origin_2d"]
+                    item["motion_origin_2d"] = [
+                        int((mo[0] - crop_x0) * resize_scale),
+                        int((mo[1] - crop_y0) * resize_scale),
+                    ]
+                # motion_axis_2d is a normalized direction, no offset/scale needed
+
+            # Adjust motion arrows for visualization
+            motion_arrows = [
+                (
+                    [int((o[0] - crop_x0) * resize_scale), int((o[1] - crop_y0) * resize_scale)],
+                    [int((e[0] - crop_x0) * resize_scale), int((e[1] - crop_y0) * resize_scale)],
+                    mt,
+                )
+                for o, e, mt in motion_arrows
+            ]
+
+            # Adjust intrinsics: crop shifts principal point, resize scales everything
+            out_intr = (
+                out_intr[0] * resize_scale,
+                out_intr[1] * resize_scale,
+                (out_intr[2] - crop_x0) * resize_scale,
+                (out_intr[3] - crop_y0) * resize_scale,
+            )
+            w_img, h_img = output_size, output_size
+
+            # Project 3D trajectories to 2D image space
+            fx_out, fy_out, cx_out, cy_out = out_intr
+            for item in solution:
+                if "trajectory" in item and "motion_origin_cam" in item:
+                    o_cam = np.array(item["motion_origin_cam"])
+                    traj_2d = []
+                    for pt in item["trajectory"]:
+                        p_cam = o_cam + np.array(pt)
+                        if p_cam[2] > 0:
+                            u = round(float(p_cam[0] * fx_out / p_cam[2] + cx_out))
+                            v = round(float(p_cam[1] * fy_out / p_cam[2] + cy_out))
+                            traj_2d.append([u, v])
+                        else:
+                            traj_2d.append(None)
+                    item["trajectory_2d"] = traj_2d
+
             # Save image, mask, and depth
             sample_id = f"{visit_id}_{video_id}_{desc_id[:8]}_v{view_idx}"
             img_filename = f"{sample_id}.jpg"
@@ -737,8 +909,9 @@ def main(
             # Save depth as uint16 PNG (meters -> mm)
             depth_raw = get_depth(fidx)
             depth_mm = np.clip(depth_raw * 1000.0, 0, 65535).astype(np.uint16)
-            if s != 1.0:
-                depth_mm = cv2.resize(depth_mm, (w_img, h_img), interpolation=cv2.INTER_NEAREST)
+            depth_mm = depth_mm[crop_y0:crop_y1, crop_x0:crop_x1]
+            if actual_crop != output_size:
+                depth_mm = cv2.resize(depth_mm, (output_size, output_size), interpolation=cv2.INTER_NEAREST)
             cv2.imwrite(str(depth_dir / depth_filename), depth_mm)
 
             # Save visualization with motion arrows
@@ -752,6 +925,16 @@ def main(
                 color = (255, 100, 0) if m_type == "rot" else (0, 100, 255)
                 cv2.arrowedLine(vis_img, tuple(arrow_origin), tuple(arrow_end), color, 3, tipLength=0.3)
                 cv2.circle(vis_img, tuple(arrow_origin), 6, color, -1)
+            # Draw trajectory_2d as polylines
+            for item in solution:
+                if "trajectory_2d" in item:
+                    pts = [p for p in item["trajectory_2d"] if p is not None]
+                    m_type = item.get("motion_type", "trans")
+                    color = (255, 100, 0) if m_type == "rot" else (0, 100, 255)
+                    for j in range(len(pts) - 1):
+                        cv2.line(vis_img, tuple(pts[j]), tuple(pts[j + 1]), color, 2)
+                    for p in pts:
+                        cv2.circle(vis_img, tuple(p), 4, color, -1)
             imageio.imwrite(vis_dir / img_filename, vis_img)
 
             # Build record

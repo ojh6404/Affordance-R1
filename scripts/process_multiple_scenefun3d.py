@@ -17,6 +17,7 @@ SceneFun3D Toolkit
 """
 
 import json
+import random
 import shutil
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -124,14 +125,18 @@ def main(
     ] = 0.1,
     max_depth: Annotated[
         float, tyro.conf.arg(help="Maximum distance (meters) from camera to annotation. 0=disabled")
-    ] = 3.0,
+    ] = 2.0,
     mask_alpha: Annotated[float, tyro.conf.arg(help="Mask opacity for visualization (0.0-1.0)")] = 0.5,
     max_views: Annotated[
         Optional[int], tyro.conf.arg(help="Max viewpoints per description. None=all valid frames")
-    ] = None,
+    ] = 1,
     min_view_gap: Annotated[int, tyro.conf.arg(help="Minimum frame index gap between selected viewpoints")] = 5,
-    output_scale: Annotated[float, tyro.conf.arg(help="Scale factor for output image size (e.g., 0.667 for 2/3)")] = 2 / 3,
-    n_workers: Annotated[int, tyro.conf.arg(help="Number of parallel workers (1=sequential)")] = 4,
+    output_size: Annotated[int, tyro.conf.arg(help="Output image size NxN (e.g., 840)")] = 840,
+    adaptive_crop_scale: Annotated[Optional[float], tyro.conf.arg(help="Image-to-bbox scale for adaptive crop (e.g., 2.5 = output image is 2.5x the annotation bbox). None=fixed crop")] = None,
+    bbox_margin: Annotated[float, tyro.conf.arg(help="Margin ratio added around each bbox (e.g., 0.1 = 10%% of bbox size per side)")] = 0.2,
+    n_workers: Annotated[int, tyro.conf.arg(help="Number of parallel workers (1=sequential)")] = 16,
+    val_ratio: Annotated[float, tyro.conf.arg(help="Fraction of scenes for validation split (0.0=no split, 0.2=20%% val)")] = 0.1,
+    split_seed: Annotated[int, tyro.conf.arg(help="Random seed for train/val split")] = 42,
 ):
     root_path = Path(root_dir).expanduser()
     if not root_path.exists():
@@ -148,9 +153,19 @@ def main(
             print("No valid scenes found.")
             sys.exit(1)
 
+    # Split scenes into train/val if requested
+    if val_ratio > 0.0:
+        rng = random.Random(split_seed)
+        shuffled = list(scenes)
+        rng.shuffle(shuffled)
+        n_val = max(1, int(len(shuffled) * val_ratio))
+        val_scenes = set(map(tuple, shuffled[:n_val]))
+        print(f"Train/val split: {len(scenes) - n_val} train, {n_val} val (seed={split_seed})")
+    else:
+        val_scenes = set()
+
     script_path = str(Path(__file__).parent / "process_scenefun3d.py")
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    base_out_path = Path(output_dir)
 
     # Build common args shared by all scenes
     common_args = [
@@ -159,10 +174,13 @@ def main(
         "--max-depth", str(max_depth),
         "--mask-alpha", str(mask_alpha),
         "--min-view-gap", str(min_view_gap),
-        "--output-scale", str(output_scale),
     ]
+    common_args.extend(["--output-size", str(output_size)])
+    common_args.extend(["--bbox-margin", str(bbox_margin)])
     if max_views is not None:
         common_args.extend(["--max-views", str(max_views)])
+    if adaptive_crop_scale is not None:
+        common_args.extend(["--adaptive-crop-scale", str(adaptive_crop_scale)])
 
     # Create per-scene temp directories so subprocesses don't conflict on dataset.json
     tmp_base = tempfile.mkdtemp(prefix="scenefun3d_")
@@ -171,24 +189,42 @@ def main(
         tmp_dir = str(Path(tmp_base) / f"{vid_id}_{v_id}")
         task_args.append((vid_id, v_id, script_path, root_dir, tmp_dir, common_args))
 
+    # Determine output path for each scene based on split
+    def get_out_path(vid_id, v_id):
+        if not val_scenes:
+            return base_out_path
+        if (vid_id, v_id) in val_scenes:
+            return base_out_path / "val"
+        return base_out_path / "train"
+
     # Process scenes — merge results immediately as each scene completes
     print(f"Processing {len(scenes)} scenes with {n_workers} workers...")
     succeeded = 0
     failed = 0
-    all_records = []
+    train_records = []
+    val_records = []
+
+    def handle_result(vid_id, v_id, ok, msg, tmp_dir, idx):
+        nonlocal succeeded, failed
+        if ok:
+            succeeded += 1
+            out_path = get_out_path(vid_id, v_id)
+            out_path.mkdir(parents=True, exist_ok=True)
+            is_val = (vid_id, v_id) in val_scenes
+            records = val_records if is_val else train_records
+            n_rec = merge_scene_result(tmp_dir, out_path, records)
+            split_tag = " [val]" if is_val else ""
+            print(f"[{idx}/{len(scenes)}] {vid_id}/{v_id}: OK ({n_rec} records, {len(records)} total){split_tag} | {msg}")
+        else:
+            failed += 1
+            print(f"[{idx}/{len(scenes)}] {vid_id}/{v_id}: FAILED | {msg[:200]}")
 
     if n_workers <= 1:
         # Sequential
         for i, args in enumerate(task_args):
             print(f"[{i+1}/{len(scenes)}] {args[0]}/{args[1]}...")
             vid_id, v_id, ok, msg = process_scene(args)
-            if ok:
-                succeeded += 1
-                n_rec = merge_scene_result(args[4], out_path, all_records)
-                print(f"  OK ({n_rec} records, {len(all_records)} total): {msg}")
-            else:
-                failed += 1
-                print(f"  FAILED: {msg[:200]}")
+            handle_result(vid_id, v_id, ok, msg, args[4], i + 1)
     else:
         # Parallel
         with ProcessPoolExecutor(max_workers=n_workers) as executor:
@@ -196,20 +232,20 @@ def main(
             for i, future in enumerate(as_completed(futures)):
                 a = futures[future]
                 vid_id, v_id, ok, msg = future.result()
-                if ok:
-                    succeeded += 1
-                    n_rec = merge_scene_result(a[4], out_path, all_records)
-                    print(f"[{i+1}/{len(scenes)}] {vid_id}/{v_id}: OK ({n_rec} records, {len(all_records)} total) | {msg}")
-                else:
-                    failed += 1
-                    print(f"[{i+1}/{len(scenes)}] {vid_id}/{v_id}: FAILED | {msg}")
+                handle_result(vid_id, v_id, ok, msg, a[4], i + 1)
 
     # Cleanup temp base dir
     shutil.rmtree(tmp_base, ignore_errors=True)
 
     print(f"\n{'=' * 80}")
-    print(f"Done! {len(all_records)} records from {succeeded} scenes ({failed} failed)")
-    print(f"Output: {out_path / 'dataset.json'}")
+    if val_scenes:
+        print(f"Done! train: {len(train_records)} records, val: {len(val_records)} records from {succeeded} scenes ({failed} failed)")
+        print(f"Output: {base_out_path / 'train' / 'dataset.json'}")
+        print(f"        {base_out_path / 'val' / 'dataset.json'}")
+    else:
+        total = len(train_records)
+        print(f"Done! {total} records from {succeeded} scenes ({failed} failed)")
+        print(f"Output: {base_out_path / 'dataset.json'}")
     print(f"{'=' * 80}")
 
 
