@@ -228,6 +228,8 @@ def main(
         show_motion = server.gui.add_checkbox("Show motion arrows", initial_value=True)
         show_traj = server.gui.add_checkbox("Show trajectory", initial_value=True)
         show_bbox = server.gui.add_checkbox("Show bounding boxes", initial_value=True)
+        show_frustum = server.gui.add_checkbox("Show camera frustum", initial_value=True)
+        frustum_scale = server.gui.add_slider("Frustum scale", min=0.01, max=0.5, step=0.01, initial_value=0.1)
         pt_size = server.gui.add_slider("Point size", min=0.001, max=0.02, step=0.001, initial_value=point_size)
         ds_slider = server.gui.add_slider("Downsample", min=1, max=8, step=1, initial_value=downsample)
 
@@ -329,6 +331,7 @@ def main(
         server.scene.remove_by_name("pointcloud")
         server.scene.remove_by_name("annotations")
         server.scene.remove_by_name("motions")
+        server.scene.remove_by_name("camera")
 
         # Add point cloud
         server.scene.add_point_cloud(
@@ -465,12 +468,29 @@ def main(
                             point_shape="rounded",
                         )
 
+        # --- Camera frustum ---
+        if show_frustum.value:
+            fov_y = 2.0 * np.arctan(h_img / (2.0 * fy))
+            aspect = w_img / h_img
+            cam_position = (-center).astype(np.float32)
+            server.scene.add_camera_frustum(
+                "camera/frustum",
+                fov=fov_y,
+                aspect=aspect,
+                scale=frustum_scale.value,
+                position=cam_position,
+                wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                image=rgb,
+            )
+
     # Register callbacks
     sample_slider.on_update(update_scene)
     show_mask.on_update(update_scene)
     show_motion.on_update(update_scene)
     show_traj.on_update(update_scene)
     show_bbox.on_update(update_scene)
+    show_frustum.on_update(update_scene)
+    frustum_scale.on_update(update_scene)
     show_2d.on_update(update_scene)
     pt_size.on_update(update_scene)
     ds_slider.on_update(update_scene)
