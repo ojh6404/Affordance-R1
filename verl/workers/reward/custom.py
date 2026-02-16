@@ -83,8 +83,8 @@ class CustomRewardManager:
             if isinstance(result, tuple):
                 score, components = result
                 for k, v in components.items():
-                    component_accum.setdefault(k, 0.0)
-                    component_accum[k] += v
+                    component_accum.setdefault(k, [])
+                    component_accum[k].append(v)
             else:
                 score = result
 
@@ -100,11 +100,14 @@ class CustomRewardManager:
                 print("[score]", score)
                 print("[length]", len(response_str))
 
-        # Store per-component means for logging
-        if component_accum and n_samples > 0:
-            self.last_component_metrics = {
-                f"critic/rewards/{k}/mean": v / n_samples for k, v in component_accum.items()
-            }
+        # Store per-component stats for logging
+        if component_accum:
+            metrics = {}
+            for k, vals in component_accum.items():
+                metrics[f"critic/rewards/{k}/mean"] = sum(vals) / len(vals)
+                metrics[f"critic/rewards/{k}/max"] = max(vals)
+                metrics[f"critic/rewards/{k}/min"] = min(vals)
+            self.last_component_metrics = metrics
         else:
             self.last_component_metrics = {}
 
