@@ -40,19 +40,19 @@ def points_to_direction(two_points):
     return direction / np.maximum(norms, 1e-8)
 
 
-def batch_motion_axis_cosine(pred_axis_points, gt_axes):
+def batch_motion_axis_cosine(pred_axis_points, gt_axes, signed=False):
     """Cosine similarity between predicted two-point axes and GT unit vectors.
     pred_axis_points: (M, 2, 2) — predicted as two image points
     gt_axes: (N, 2) — GT unit direction vectors
-    Returns: (M, N) absolute cosine similarity
-
-    Uses abs() so that reversed point order ([[A,B]] vs [[B,A]]) gives
-    the same result — both define the same axis.
+    signed: if False, use abs() (rot: axis has no direction);
+            if True, keep sign (trans: direction matters)
+    Returns: (M, N) cosine similarity
     """
     pred_dirs = points_to_direction(pred_axis_points)  # (M, 2)
     gt_norms = np.linalg.norm(gt_axes, axis=1, keepdims=True)
     gt_dirs = gt_axes / np.maximum(gt_norms, 1e-8)
-    return np.abs(pred_dirs @ gt_dirs.T)
+    cos = pred_dirs @ gt_dirs.T
+    return cos if signed else np.abs(cos)
 
 
 def batch_point_to_line_distance(pred_axis_points, gt_origins):
@@ -167,9 +167,12 @@ def scenefun3d_motion_accuracy_reward(predict_str: str, ground_truth: str) -> fl
         if not any(gt_has_motion):
             return max_reward  # no motion GT → skip, no penalty
 
-        # Check which GT objects are rot with origin available
-        gt_is_rot_with_origin = [
-            item.get("motion_type") == "rot" and "motion_origin_2d" in item
+        # Check which GT objects have an origin-on-line reference point:
+        #   rot  → motion_origin_2d (rotation center)
+        #   trans → point_2d (interaction point should lie on the axis)
+        gt_has_origin_ref = [
+            (item.get("motion_type") == "rot" and "motion_origin_2d" in item)
+            or (item.get("motion_type") == "trans" and "point_2d" in item)
             for item in gt_data
         ]
 
@@ -187,16 +190,33 @@ def scenefun3d_motion_accuracy_reward(predict_str: str, ground_truth: str) -> fl
         # --- Extract GT motion fields ---
         gt_motion_types = [item.get("motion_type", "") for item in gt_data]
         gt_axes = np.array([item.get("motion_axis_2d", [0, 0]) for item in gt_data], dtype=float)  # (N, 2) unit vec
-        gt_origins = np.array([item.get("motion_origin_2d", [0, 0]) for item in gt_data], dtype=float)  # (N, 2)
+
+        # Build origin reference: rot uses motion_origin_2d, trans uses point_2d
+        gt_origins_list = []
+        for item in gt_data:
+            if item.get("motion_type") == "rot":
+                gt_origins_list.append(item.get("motion_origin_2d", [0, 0]))
+            else:  # trans or unknown
+                gt_origins_list.append(item.get("point_2d", [0, 0]))
+        gt_origins = np.array(gt_origins_list, dtype=float)  # (N, 2)
 
         # --- Compute motion reward matrices (M, N) ---
         type_reward = batch_motion_type_match(pred_motion_types, gt_motion_types)
-        axis_reward = (batch_motion_axis_cosine(pred_axes, gt_axes) > 0.85).astype(float)
 
-        # Origin-on-line reward: only for rot GT with origin
-        origin_reward = (batch_point_to_line_distance(pred_axes, gt_origins) < 50).astype(float)
+        # Axis cosine: rot uses abs (undirected axis), trans uses signed (direction matters)
+        axis_cos_abs = batch_motion_axis_cosine(pred_axes, gt_axes, signed=False)   # (M, N)
+        axis_cos_signed = batch_motion_axis_cosine(pred_axes, gt_axes, signed=True)  # (M, N)
+        axis_reward = np.zeros((M, N), dtype=float)
         for j in range(N):
-            if not gt_is_rot_with_origin[j]:
+            if gt_motion_types[j] == "trans":
+                axis_reward[:, j] = (axis_cos_signed[:, j] > 0.85).astype(float)
+            else:
+                axis_reward[:, j] = (axis_cos_abs[:, j] > 0.85).astype(float)
+
+        # Origin-on-line reward: rot (origin on axis) + trans (point_2d on axis)
+        origin_reward = (batch_point_to_line_distance(pred_axes, gt_origins) < 30).astype(float)
+        for j in range(N):
+            if not gt_has_origin_ref[j]:
                 origin_reward[:, j] = 0.0
 
         motion_reward = type_reward + axis_reward + origin_reward  # (M, N)
@@ -298,3 +318,21 @@ if __name__ == "__main__":
     print(f"  total: {total}")
     for k, v in components.items():
         print(f"  {k}: {v}")
+
+    # --- Trans example: point_2d should lie on axis ---
+    print("\n=== Trans Example ===")
+    predict_trans = (
+        "<think>A drawer that slides open.</think>\n"
+        "<rethink>It translates horizontally along the drawer rail.</rethink>\n"
+        '<answer>[{"bbox_2d": [100, 200, 300, 400], "point_2d": [200, 300], "affordance": "pull", '
+        '"motion_type": "trans", '
+        '"motion_axis_2d": [[150, 300], [250, 300]]}]</answer>'
+    )
+    ground_truth_trans = json.dumps([{
+        "bbox_2d": [100, 200, 300, 400],
+        "point_2d": [200, 300],
+        "affordance": "pull",
+        "motion_type": "trans",
+        "motion_axis_2d": [1.0, 0.0],
+    }])
+    print("  motion_accuracy:", scenefun3d_motion_accuracy_reward(predict_trans, ground_truth_trans), "/ 3.0")
