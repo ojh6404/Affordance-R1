@@ -236,7 +236,9 @@ class RLHFDataset(Dataset):
             user_content = prompt_template.format(
                 Question=row_dict["problem"].lower().strip("."),
                 AnswerMotion='[{"bbox_2d": [10,100,200,210], "point_2d": [30,110], "affordance": "turn on", '
-                '"motion_type": "rot", "motion_axis_2d": [[105,155],[105,55]]}]',
+                '"motion_type": "rot", "motion_axis_2d": [[60,180],[150,80]]}, '
+                '{"bbox_2d": [225,296,706,786], "point_2d": [302,410], "affordance": "pull", '
+                '"motion_type": "trans", "motion_axis_2d": [[300,540],[500,400]]}]',
             )
         else:
             user_content = self.user_prompt.format(
